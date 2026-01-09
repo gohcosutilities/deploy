@@ -413,7 +413,7 @@ services:
       - local
 
   postgres:
-    image: postgres:13
+    image: postgres:18
     environment:
       POSTGRES_DB: hcos_db
       POSTGRES_USER: hcos_user
