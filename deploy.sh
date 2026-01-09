@@ -462,6 +462,8 @@ services:
       - redis
     networks:
       - local
+    ports:
+      - "5000:5000"      
 
   celery:
     build: 
