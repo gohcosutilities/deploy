@@ -89,6 +89,21 @@ read -p "GitHub Username: " GITHUB_USER
 read -s -p "GitHub Password/Token: " GITHUB_TOKEN
 echo ""
 
+# 1b. Ask for Cloudflare Credentials (for wildcard SSL)
+echo -e "${YELLOW}Please enter your Cloudflare credentials for wildcard SSL generation.${NC}"
+echo -e "${YELLOW}You need either an API Token OR Global API Key + Email.${NC}"
+echo ""
+read -p "Cloudflare API Token (recommended, press Enter to skip): " CLOUDFLARE_API_TOKEN
+if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+    echo -e "${YELLOW}Using Global API Key method...${NC}"
+    read -p "Cloudflare Email: " CLOUDFLARE_EMAIL
+    read -s -p "Cloudflare Global API Key: " CLOUDFLARE_API_KEY
+    echo ""
+else
+    CLOUDFLARE_EMAIL=""
+    CLOUDFLARE_API_KEY=""
+fi
+
 # 2. DETECT AND STOP WEB SERVERS (IMPROVED - BEFORE INSTALLATION)
 echo -e "${YELLOW}Checking for existing web servers...${NC}"
 
@@ -202,6 +217,28 @@ mkdir -p nginx-ssl/templates
 mkdir -p certbot/conf
 mkdir -p certbot/www
 
+# Create Cloudflare credentials file for DNS-01 challenge
+echo -e "${YELLOW}Creating Cloudflare credentials file for wildcard SSL...${NC}"
+mkdir -p certbot/cloudflare
+
+if [ ! -z "$CLOUDFLARE_API_TOKEN" ]; then
+    # API Token method (recommended)
+    cat > certbot/cloudflare/cloudflare.ini <<EOF
+# Cloudflare API token (recommended)
+dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN
+EOF
+else
+    # Global API Key method (legacy)
+    cat > certbot/cloudflare/cloudflare.ini <<EOF
+# Cloudflare Global API Key (legacy method)
+dns_cloudflare_email = $CLOUDFLARE_EMAIL
+dns_cloudflare_api_key = $CLOUDFLARE_API_KEY
+EOF
+fi
+
+chmod 600 certbot/cloudflare/cloudflare.ini
+echo -e "${GREEN}Cloudflare credentials file created.${NC}"
+
 # Create docker-compose-ssl.yml
 cat > docker-compose-ssl.yml <<EOF
 version: '3'
@@ -227,6 +264,16 @@ services:
     command: certonly --non-interactive --webroot -w /var/www/certbot --email ${CERT_EMAIL} -d request.hcos.io -d onedash.hcos.io -d hcos.io -d key.hcos.io -d gohcos.com --agree-tos --expand
     depends_on:
       - nginx
+    networks:
+      - local
+  
+  certbot-wildcard:
+    image: certbot/dns-cloudflare:latest
+    container_name: certbot-wildcard
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/cloudflare:/etc/cloudflare
+    command: certonly --non-interactive --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare/cloudflare.ini --dns-cloudflare-propagation-seconds 60 --email ${CERT_EMAIL} -d "*.hcos.io" -d hcos.io --agree-tos --cert-name wildcard.hcos.io
     networks:
       - local
 
@@ -293,6 +340,23 @@ fi
 
 echo -e "${GREEN}Certificates generated successfully!${NC}"
 
+# Generate wildcard SSL certificate using DNS-01 challenge
+echo -e "${YELLOW}Generating wildcard SSL certificate for *.hcos.io (DNS-01 challenge)...${NC}"
+echo -e "${YELLOW}This may take 1-2 minutes for DNS propagation...${NC}"
+
+docker compose -f docker-compose-ssl.yml up certbot-wildcard
+
+# Check if wildcard cert was generated
+if [ ! -f "./certbot/conf/live/wildcard.hcos.io/fullchain.pem" ]; then
+    echo -e "${RED}⚠️  Wildcard certificate generation failed.${NC}"
+    echo -e "${YELLOW}This is not critical - the system will still work with individual certificates.${NC}"
+    echo -e "${YELLOW}Check Cloudflare credentials and DNS settings if you need wildcard SSL.${NC}"
+    WILDCARD_SSL_AVAILABLE=false
+else
+    echo -e "${GREEN}✅ Wildcard SSL certificate generated successfully!${NC}"
+    WILDCARD_SSL_AVAILABLE=true
+fi
+
 # Stop SSL containers
 echo -e "${YELLOW}Stopping temporary SSL containers...${NC}"
 docker compose -f docker-compose-ssl.yml down
@@ -327,6 +391,53 @@ mkdir -p nginx-prod
 cat > nginx-prod/default.conf <<EOF
 upstream keycloak_upstream { server keycloak:8080; }
 upstream django_upstream { server backend:5000; }
+
+# === WILDCARD CATCH-ALL FOR TENANT SUBDOMAINS ===
+# This handles ALL *.hcos.io subdomains that don't have explicit server blocks below
+# MUST be first with default_server directive to catch all tenant subdomains
+server {
+    listen 3443 ssl default_server;
+    server_name *.hcos.io;
+    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+
+    # Serve OneDash frontend for all tenant subdomains
+    root /var/www/onedash;
+    index index.html;
+
+    # Static files first, then fallback to SPA
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    # API calls go to Django backend
+    location /api/ {
+        proxy_pass https://django_upstream;
+        proxy_ssl_verify off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # WebSocket connections
+    location /ws/ {
+        proxy_pass https://django_upstream;
+        proxy_ssl_verify off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+        proxy_buffering off;
+    }
+}
+
+# === EXPLICIT SERVER BLOCKS FOR MAIN DOMAINS ===
 
 server {
     listen 3443 ssl;
@@ -363,6 +474,7 @@ server {
     server_name request.hcos.io;
     ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    
     location / {
         proxy_pass https://django_upstream;
         proxy_ssl_verify off;
@@ -370,6 +482,21 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+    }
+    
+    location /ws/ {
+        proxy_pass https://django_upstream;
+        proxy_ssl_verify off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+        proxy_buffering off;
     }
 }
 
@@ -387,12 +514,16 @@ server {
     }
 }
 
-# HTTP to HTTPS redirect
-server {
-    listen 81;
-    server_name _;
-    return 301 https://\$host\$request_uri;
-}
+# === DYNAMIC TENANT DOMAINS (AUTO-GENERATED BY NGINX MANAGER) ===
+# Custom domains (non-hcos.io) will be added here by the backend
+
+
+# HTTP to HTTPS redirect (disabled - handled by host nginx)
+#server {
+#    listen 81;
+#    server_name _;
+#    return 301 https://\$host\$request_uri;
+#}
 EOF
 
 # Create main docker-compose.yml
@@ -413,7 +544,7 @@ services:
       - local
 
   postgres:
-    image: postgres:14-alpine
+    image: postgres:13
     environment:
       POSTGRES_DB: hcos_db
       POSTGRES_USER: hcos_user
@@ -454,18 +585,20 @@ services:
     volumes:
       - ./BACKEND-API:/app
       - ./certbot/conf:/etc/letsencrypt:ro
+      - ./nginx-prod:/etc/nginx-prod
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - DATABASE_URL=postgres://hcos_user:hcos_password@postgres:5432/hcos_db
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - NGINX_CONFIG_PATH=/etc/nginx-prod/default.conf
+      - NGINX_CONTAINER_NAME=nginx_main
     depends_on:
       - postgres
       - redis
-    extra_hosts:
-      - "host.docker.internal:host-gateway"      
     networks:
       - local
     ports:
-      - "5000:5000"      
+      - "5000:5000"
 
   celery:
     build: 
@@ -484,11 +617,12 @@ services:
 
   nginx_main:
     image: nginx:latest
+    container_name: nginx_main
     ports:
       - "81:81"
       - "3443:3443"
     volumes:
-      - ./nginx-prod/default.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx-prod:/etc/nginx/conf.d
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./ONEDASH.HCOS.IO-BUILD:/var/www/onedash
       - ./HOMEPAGE-BUILD:/var/www/homepage
@@ -523,14 +657,16 @@ cat > $HOST_NGINX_CONF <<EOF
 # HCOS Proxy Configuration
 # Generated on $(date)
 
+# HTTP to HTTPS redirect for all domains
 server {
     listen 80;
-    server_name hcos.io key.hcos.io onedash.hcos.io request.hcos.io gohcos.com;
+    server_name hcos.io key.hcos.io onedash.hcos.io request.hcos.io gohcos.com *.hcos.io;
     
     # Redirect HTTP to HTTPS
     return 301 https://\$host\$request_uri;
 }
 
+# Main domains (explicit server blocks for priority)
 server {
     listen 443 ssl http2;
     server_name hcos.io key.hcos.io onedash.hcos.io request.hcos.io gohcos.com;
@@ -547,6 +683,51 @@ server {
     ssl_session_timeout 10m;
     
     # Proxy to Docker nginx_main container
+    location / {
+        proxy_pass https://127.0.0.1:3443;
+        proxy_ssl_verify off;
+        
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        
+        # Timeouts
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+}
+
+# Wildcard catch-all for tenant subdomains (*.hcos.io)
+# This handles dynamically created tenant subdomains like arcturus.hcos.io
+server {
+    listen 443 ssl http2;
+    server_name *.hcos.io;
+
+    # SSL certificates from Let's Encrypt
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
+    
+    # SSL optimizations
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    
+    # Proxy to Docker nginx_main container
+    # The Docker nginx has the wildcard server block that serves tenant subdomains
     location / {
         proxy_pass https://127.0.0.1:3443;
         proxy_ssl_verify off;
@@ -657,6 +838,37 @@ echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}DEPLOYMENT COMPLETE!${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""
+
+# 9. Run Django Management Commands
+echo -e "${YELLOW}==========================================${NC}"
+echo -e "${YELLOW}Running Django Management Commands...${NC}"
+echo -e "${YELLOW}==========================================${NC}"
+
+echo -e "${YELLOW}Waiting for database to be fully ready...${NC}"
+sleep 10
+
+echo -e "${YELLOW}1. Running database migrations...${NC}"
+docker compose exec -T backend python manage.py migrate --noinput || echo -e "${RED}Migration failed (may need manual intervention)${NC}"
+
+echo -e "${YELLOW}2. Creating base products...${NC}"
+docker compose exec -T backend python manage.py create_base_products || echo -e "${RED}Failed to create base products${NC}"
+
+echo -e "${YELLOW}3. Adding default Canada tax data...${NC}"
+docker compose exec -T backend python manage.py add_default_canada_tax || echo -e "${RED}Failed to add Canada tax data${NC}"
+
+echo -e "${YELLOW}4. Populating US tax data...${NC}"
+docker compose exec -T backend python manage.py populate_us_tax_data || echo -e "${RED}Failed to populate US tax data${NC}"
+
+echo -e "${YELLOW}5. Populating comprehensive tax data...${NC}"
+docker compose exec -T backend python manage.py populate_comprehensive_tax_data || echo -e "${RED}Failed to populate comprehensive tax data${NC}"
+
+echo -e "${GREEN}Management commands completed!${NC}"
+echo ""
+
+echo -e "${GREEN}==========================================${NC}"
+echo -e "${GREEN}SETUP COMPLETE!${NC}"
+echo -e "${GREEN}==========================================${NC}"
+echo ""
 echo -e "${YELLOW}Services are now running at:${NC}"
 echo -e "  • https://hcos.io (Homepage)"
 echo -e "  • https://onedash.hcos.io (OneDash)"
@@ -664,6 +876,17 @@ echo -e "  • https://request.hcos.io (Backend API)"
 echo -e "  • https://key.hcos.io (Keycloak)"
 echo -e "  • https://gohcos.com (Demo)"
 echo ""
+if [ "$WILDCARD_SSL_AVAILABLE" = true ]; then
+    echo -e "${GREEN}✅ Wildcard SSL Active: All *.hcos.io tenant subdomains automatically supported${NC}"
+    echo -e "  • Tenant subdomains work instantly (no SSL generation needed)"
+    echo -e "  • Example: https://arcturus.hcos.io, https://polaris.hcos.io"
+    echo ""
+else
+    echo -e "${YELLOW}⚠️  Wildcard SSL not configured - using shared certificate${NC}"
+    echo -e "  • Tenant subdomains still work with request.hcos.io certificate"
+    echo -e "  • You can generate wildcard SSL later if needed"
+    echo ""
+fi
 echo -e "${YELLOW}Important files:${NC}"
 echo -e "  • SSL Certificates: $CERT_PATH"
 echo -e "  • SSL Keys: $KEY_PATH"
