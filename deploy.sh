@@ -460,6 +460,8 @@ services:
     depends_on:
       - postgres
       - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"      
     networks:
       - local
     ports:
