@@ -142,6 +142,10 @@ apt-get install -y -qq --no-install-recommends nginx
 systemctl stop nginx 2>/dev/null || true
 systemctl disable nginx 2>/dev/null || true
 
+# Install certbot with Cloudflare DNS plugin for wildcard SSL
+echo -e "${YELLOW}Installing certbot with Cloudflare DNS plugin...${NC}"
+apt-get install -y -qq certbot python3-certbot-dns-cloudflare
+
 # Install other packages
 apt-get install -y -qq apt-transport-https ca-certificates curl gnupg lsb-release git net-tools lsof
 
@@ -218,174 +222,86 @@ systemctl stop nginx 2>/dev/null || true
 systemctl stop apache2 2>/dev/null || true
 systemctl stop httpd 2>/dev/null || true
 
-# Setup SSL directories
-echo -e "${YELLOW}Setting up SSL directories...${NC}"
-mkdir -p nginx-ssl/templates
-mkdir -p certbot/conf
-mkdir -p certbot/www
+# 5a. Generate Wildcard SSL Certificate using Certbot (Host-based)
+echo -e "${YELLOW}========================================${NC}"
+echo -e "${YELLOW}Generating Wildcard SSL Certificate${NC}"
+echo -e "${YELLOW}========================================${NC}"
 
-# Create Cloudflare credentials file for DNS-01 challenge
-echo -e "${YELLOW}Creating Cloudflare credentials file for wildcard SSL...${NC}"
-mkdir -p certbot/cloudflare
+# Create Cloudflare credentials file
+echo -e "${YELLOW}Creating Cloudflare credentials file at /opt/cf_creds.ini...${NC}"
+mkdir -p /opt
 
 if [ ! -z "$CLOUDFLARE_API_TOKEN" ]; then
     # API Token method (recommended)
-    cat > certbot/cloudflare/cloudflare.ini <<EOF
-# Cloudflare API token (recommended)
+    cat > /opt/cf_creds.ini <<EOF
+# Cloudflare API Token (recommended)
 dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN
 EOF
 else
     # Global API Key method (legacy)
-    cat > certbot/cloudflare/cloudflare.ini <<EOF
+    cat > /opt/cf_creds.ini <<EOF
 # Cloudflare Global API Key (legacy method)
 dns_cloudflare_email = $CLOUDFLARE_EMAIL
 dns_cloudflare_api_key = $CLOUDFLARE_API_KEY
 EOF
 fi
 
-chmod 600 certbot/cloudflare/cloudflare.ini
-echo -e "${GREEN}Cloudflare credentials file created.${NC}"
+chmod 400 /opt/cf_creds.ini
+echo -e "${GREEN}✓ Cloudflare credentials file created and secured.${NC}"
 
-# Create docker-compose-ssl.yml
-cat > docker-compose-ssl.yml <<EOF
-version: '3'
-services:
-  nginx:
-    image: nginx:latest
-    container_name: nginx-ssl-temp
-    volumes:
-      - ./nginx-ssl/templates:/etc/nginx/templates
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-    ports:
-      - "80:80"
-    networks:
-      - local
-
-  certbot:
-    image: certbot/certbot:latest
-    container_name: certbot-ssl-temp
-    volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-    command: certonly --non-interactive --webroot -w /var/www/certbot --email ${CERT_EMAIL} -d request.hcos.io -d onedash.hcos.io -d hcos.io -d key.hcos.io -d gohcos.com --agree-tos --expand
-    depends_on:
-      - nginx
-    networks:
-      - local
-  
-  certbot-wildcard:
-    image: certbot/dns-cloudflare:latest
-    container_name: certbot-wildcard
-    volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/cloudflare:/etc/cloudflare
-    command: certonly --non-interactive --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare/cloudflare.ini --dns-cloudflare-propagation-seconds 60 --email ${CERT_EMAIL} -d "*.hcos.io" -d hcos.io --agree-tos --cert-name wildcard.hcos.io
-    networks:
-      - local
-
-networks:
-  local:
-    driver: bridge
-EOF
-
-# Create Nginx SSL Template
-cat > nginx-ssl/templates/default.conf.template <<EOF
-server {
-    listen 80;
-    server_name request.hcos.io onedash.hcos.io hcos.io key.hcos.io gohcos.com;
-    location ~ /.well-known/acme-challenge {
-        allow all;
-        root /var/www/certbot;
-    }
-    location / {
-        return 200 'SSL Setup - HCOS';
-        add_header Content-Type text/plain;
-    }
-}
-EOF
-
-# Run SSL generation with PORT CHECK
-echo -e "${YELLOW}Starting SSL certificate generation...${NC}"
-
-# Final port 80 check
-if check_port 80; then
-    echo -e "${RED}Cannot proceed: Port 80 is still in use!${NC}"
-    echo -e "${YELLOW}Checking what's using port 80:${NC}"
-    lsof -i :80 || netstat -tulpn | grep :80 || ss -tulpn | grep :80
-    exit 1
-fi
-
-echo -e "${GREEN}Port 80 is free. Starting temporary Nginx for SSL...${NC}"
-docker compose -f docker-compose-ssl.yml up -d nginx
-
-# Verify nginx container started
-sleep 3
-if ! docker ps | grep nginx-ssl-temp > /dev/null; then
-    echo -e "${RED}Failed to start nginx-ssl-temp container${NC}"
-    docker logs nginx-ssl-temp 2>/dev/null || true
-    exit 1
-fi
-
-echo -e "${GREEN}Temporary Nginx container started successfully.${NC}"
-echo -e "${YELLOW}Requesting certificates from Let's Encrypt...${NC}"
-
-# Run certbot
-docker compose -f docker-compose-ssl.yml up certbot
-
-# Check if certs were generated
-if [ ! -f "./certbot/conf/live/request.hcos.io/fullchain.pem" ]; then
-    echo -e "${RED}Certificate generation failed. Please check:${NC}"
-    echo -e "1. DNS records point to this server's IP"
-    echo -e "2. Port 80 is accessible from internet"
-    echo -e "3. Check logs above for specific errors"
-    
-    # Clean up temp containers
-    docker compose -f docker-compose-ssl.yml down
-    exit 1
-fi
-
-echo -e "${GREEN}Certificates generated successfully!${NC}"
-
-# Generate wildcard SSL certificate using DNS-01 challenge
-echo -e "${YELLOW}Generating wildcard SSL certificate for *.hcos.io (DNS-01 challenge)...${NC}"
+# Generate wildcard SSL certificate
+echo -e "${YELLOW}Generating wildcard SSL certificate for hcos.io and *.hcos.io...${NC}"
 echo -e "${YELLOW}This may take 1-2 minutes for DNS propagation...${NC}"
 
-docker compose -f docker-compose-ssl.yml up certbot-wildcard
-
-# Check if wildcard cert was generated
-if [ ! -f "./certbot/conf/live/wildcard.hcos.io/fullchain.pem" ]; then
-    echo -e "${RED}⚠️  Wildcard certificate generation failed.${NC}"
-    echo -e "${YELLOW}This is not critical - the system will still work with individual certificates.${NC}"
-    echo -e "${YELLOW}Check Cloudflare credentials and DNS settings if you need wildcard SSL.${NC}"
-    WILDCARD_SSL_AVAILABLE=false
-else
+if certbot certonly \
+  --non-interactive \
+  --agree-tos \
+  --email "${CERT_EMAIL}" \
+  --dns-cloudflare \
+  --dns-cloudflare-credentials /opt/cf_creds.ini \
+  --dns-cloudflare-propagation-seconds 60 \
+  -d hcos.io \
+  -d '*.hcos.io'; then
+    
     echo -e "${GREEN}✅ Wildcard SSL certificate generated successfully!${NC}"
     WILDCARD_SSL_AVAILABLE=true
+    
+    # Set certificate paths to the wildcard certificate
+    CERT_PATH="/etc/letsencrypt/live/hcos.io/fullchain.pem"
+    KEY_PATH="/etc/letsencrypt/live/hcos.io/privkey.pem"
+    
+    echo -e "${GREEN}Certificate: $CERT_PATH${NC}"
+    echo -e "${GREEN}Key: $KEY_PATH${NC}"
+else
+    echo -e "${RED}⚠️ Wildcard certificate generation failed!${NC}"
+    echo -e "${RED}Please check:${NC}"
+    echo -e "  1. Cloudflare API token/key has DNS edit permissions"
+    echo -e "  2. Domain is properly configured in Cloudflare"
+    echo -e "  3. DNS propagation is working"
+    echo ""
+    echo -e "${YELLOW}Cannot proceed without SSL certificate. Exiting.${NC}"
+    exit 1
 fi
 
-# Stop SSL containers
-echo -e "${YELLOW}Stopping temporary SSL containers...${NC}"
-docker compose -f docker-compose-ssl.yml down
+# Verify certificate files exist
+if [ ! -f "$CERT_PATH" ] || [ ! -f "$KEY_PATH" ]; then
+    echo -e "${RED}SSL certificate files not found after generation!${NC}"
+    exit 1
+fi
 
-# Store cert path variables
-CERT_PATH="$BASE_DIR/certbot/conf/live/request.hcos.io/fullchain.pem"
-KEY_PATH="$BASE_DIR/certbot/conf/live/request.hcos.io/privkey.pem"
-
-# Create symlinks for compatibility
-echo -e "${YELLOW}Creating compatibility symlinks...${NC}"
-mkdir -p /etc/letsencrypt/live/request.hcos.io
-ln -sf "$CERT_PATH" /etc/letsencrypt/live/request.hcos.io/fullchain.pem
-ln -sf "$KEY_PATH" /etc/letsencrypt/live/request.hcos.io/privkey.pem
+echo -e "${GREEN}✅ SSL certificate verification passed.${NC}"
+echo ""
 
 # Save SSL paths for later use
 cat > "$BASE_DIR/ssl_paths.env" <<EOF
 # SSL Certificate Paths - HCOS Deployment
 # Generated on $(date)
+# Using Wildcard Certificate for hcos.io and *.hcos.io
 SSL_CERT_PATH="$CERT_PATH"
 SSL_KEY_PATH="$KEY_PATH"
 BASE_DIR="$BASE_DIR"
 DOMAINS="${DOMAINS[*]}"
+WILDCARD_SSL_AVAILABLE=$WILDCARD_SSL_AVAILABLE
 EOF
 
 echo -e "${GREEN}SSL paths saved to $BASE_DIR/ssl_paths.env${NC}"
@@ -405,8 +321,8 @@ upstream django_upstream { server backend:5000; }
 server {
     listen 3443 ssl default_server;
     server_name *.hcos.io;
-    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
 
     # Serve OneDash frontend for all tenant subdomains
     root /var/www/onedash;
@@ -449,8 +365,8 @@ server {
 server {
     listen 3443 ssl;
     server_name onedash.hcos.io;
-    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
     root /var/www/onedash;
     index index.html;
     location / { try_files \$uri \$uri/ /index.html; }
@@ -459,8 +375,8 @@ server {
 server {
     listen 3443 ssl;
     server_name hcos.io;
-    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
     root /var/www/homepage;
     index index.html;
     location / { try_files \$uri \$uri/ /index.html; }
@@ -469,8 +385,8 @@ server {
 server {
     listen 3443 ssl;
     server_name gohcos.com;
-    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
     root /var/www/demo;
     index index.html;
     location / { try_files \$uri \$uri/ /index.html; }
@@ -479,8 +395,8 @@ server {
 server {
     listen 3443 ssl;
     server_name request.hcos.io;
-    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
     
     location / {
         proxy_pass https://django_upstream;
@@ -510,8 +426,8 @@ server {
 server {
     listen 3443 ssl;
     server_name key.hcos.io;
-    ssl_certificate /etc/letsencrypt/live/request.hcos.io/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/request.hcos.io/privkey.pem;
+    ssl_certificate $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
     location / {
         proxy_pass http://keycloak_upstream;
         proxy_set_header Host \$host;
@@ -588,10 +504,10 @@ services:
   backend:
     build: 
       context: ./BACKEND-API
-    command: sh -c "daphne -e ssl:port=5000:privateKey=/etc/letsencrypt/live/request.hcos.io/privkey.pem:certKey=/etc/letsencrypt/live/request.hcos.io/fullchain.pem hcos.asgi:application"
+    command: sh -c "daphne -e ssl:port=5000:privateKey=$KEY_PATH:certKey=$CERT_PATH hcos.asgi:application"
     volumes:
       - ./BACKEND-API:/app
-      - ./certbot/conf:/etc/letsencrypt:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
       - ./nginx-prod:/etc/nginx-prod
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -632,7 +548,7 @@ services:
       - "3443:3443"
     volumes:
       - ./nginx-prod:/etc/nginx/conf.d
-      - ./certbot/conf:/etc/letsencrypt:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
       - ./ONEDASH.HCOS.IO-BUILD:/var/www/onedash
       - ./HOMEPAGE-BUILD:/var/www/homepage
       - ./DEMONSTRATION-HOMEPAGE-BUILD:/var/www/demo
