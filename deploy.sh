@@ -138,6 +138,7 @@ apt-get update -qq
 # Install nginx without starting it
 echo -e "${YELLOW}Installing nginx (will not auto-start)...${NC}"
 apt-get install -y -qq --no-install-recommends nginx
+
 systemctl stop nginx 2>/dev/null || true
 systemctl disable nginx 2>/dev/null || true
 
@@ -150,6 +151,11 @@ if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com -o get-docker.sh
     sh get-docker.sh
     rm get-docker.sh
+fi
+
+if ! command -v docker-compose &> /dev/null; then
+    echo -e "${YELLOW}Installing docker-compose...${NC}"
+    apt-get install -y docker-compose
 fi
 
 # Install Docker Compose if not present
@@ -545,7 +551,7 @@ services:
       - local
 
   postgres:
-    image: postgres:13
+    image: postgres:14-alpine
     environment:
       POSTGRES_DB: hcos_db
       POSTGRES_USER: hcos_user
@@ -598,6 +604,8 @@ services:
       - redis
     networks:
       - local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"      
     ports:
       - "5000:5000"
 
