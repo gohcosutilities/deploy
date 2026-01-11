@@ -86,7 +86,7 @@ docker compose -f docker-compose-ssl.yml down 2>/dev/null || true
 # 1. Ask for GitHub Credentials
 echo -e "${YELLOW}Please enter your GitHub credentials to clone private repositories.${NC}"
 read -p "GitHub Username: " GITHUB_USER
-read -s -p "GitHub Password/Token: " GITHUB_TOKEN
+read -sp "GitHub Password/Token: " GITHUB_TOKEN
 echo ""
 
 # 1b. Ask for Cloudflare Credentials (for wildcard SSL)
@@ -94,10 +94,11 @@ echo -e "${YELLOW}Please enter your Cloudflare credentials for wildcard SSL gene
 echo -e "${YELLOW}You need either an API Token OR Global API Key + Email.${NC}"
 echo ""
 read -p "Cloudflare API Token (recommended, press Enter to skip): " CLOUDFLARE_API_TOKEN
+
 if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
     echo -e "${YELLOW}Using Global API Key method...${NC}"
     read -p "Cloudflare Email: " CLOUDFLARE_EMAIL
-    read -s -p "Cloudflare Global API Key: " CLOUDFLARE_API_KEY
+    read -sp "Cloudflare Global API Key: " CLOUDFLARE_API_KEY
     echo ""
 else
     CLOUDFLARE_EMAIL=""
