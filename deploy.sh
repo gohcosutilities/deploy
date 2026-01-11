@@ -413,7 +413,7 @@ services:
       - local
 
   postgres:
-    image: postgres:18
+    image: postgres:14-alpine
     environment:
       POSTGRES_DB: hcos_db
       POSTGRES_USER: hcos_user
