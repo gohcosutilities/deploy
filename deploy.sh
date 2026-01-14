@@ -614,9 +614,10 @@ generate_nginx_config() {
 
     # Generate Nginx upstream blocks for backend domains
     UPSTREAM_BLOCKS=""
+
     for domain in "${BACKEND_DOMAINS[@]}"; do
-        UPSTREAM_NAME=$(echo "$domain" | tr '.' '_' | tr '-' '_')_backend
-        UPSTREAM_BLOCKS+="upstream $UPSTREAM_NAME { server backend:5000; }\n\n"
+    UPSTREAM_NAME=$(echo "$domain" | tr '.-' '_' )_backend
+    UPSTREAM_BLOCKS+=$(printf "upstream %s { server backend:5000; }\n\n" "$UPSTREAM_NAME")
     done
 
     # Generate Nginx server blocks
