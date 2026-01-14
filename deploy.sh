@@ -296,7 +296,7 @@ create_cloudflare_dns_records() {
     if curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
         -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
         -H "Content-Type: application/json" \
-        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$PUBLIC_IP\",\"ttl\":120,\"proxied\":true}" > /dev/null; then
+        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$PUBLIC_IP\",\"ttl\":120,\"proxied\":false}" > /dev/null; then
         echo -e "${GREEN}✓ A record created for $domain${NC}"
     else
         echo -e "${RED}✗ Failed to create A record for $domain${NC}"
@@ -306,7 +306,7 @@ create_cloudflare_dns_records() {
     if curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
         -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
         -H "Content-Type: application/json" \
-        --data "{\"type\":\"CNAME\",\"name\":\"www.$domain\",\"content\":\"$domain\",\"ttl\":120,\"proxied\":true}" > /dev/null; then
+        --data "{\"type\":\"CNAME\",\"name\":\"www.$domain\",\"content\":\"$domain\",\"ttl\":120,\"proxied\":false}" > /dev/null; then
         echo -e "${GREEN}✓ CNAME record created for www.$domain${NC}"
     else
         echo -e "${RED}✗ Failed to create CNAME record for www.$domain${NC}"
@@ -319,7 +319,7 @@ create_cloudflare_dns_records() {
             if curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
                 -H "Content-Type: application/json" \
-                --data "{\"type\":\"A\",\"name\":\"$subdomain.$domain\",\"content\":\"$PUBLIC_IP\",\"ttl\":120,\"proxied\":true}" > /dev/null; then
+                --data "{\"type\":\"A\",\"name\":\"$subdomain.$domain\",\"content\":\"$PUBLIC_IP\",\"ttl\":120,\"proxied\":false}" > /dev/null; then
                 echo -e "${GREEN}✓ A record created for $subdomain.$domain${NC}"
             else
                 echo -e "${RED}✗ Failed to create A record for $subdomain.$domain${NC}"
