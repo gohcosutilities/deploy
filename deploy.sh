@@ -902,21 +902,7 @@ server {
         fi
     done
 
-    cat > $HOST_NGINX_CONF <<EOF
-# HCOS Proxy Configuration
-# Generated on $(date)
 
-# HTTP to HTTPS redirect for all domains
-server {
-    listen 80;
-    server_name $SERVER_NAMES;
-    
-    # Redirect HTTP to HTTPS
-    return 301 https://\$host\$request_uri;
-}
-
-$HOST_SERVER_BLOCKS
-EOF
     
     echo -e "${GREEN}✓ Host Nginx configuration created${NC}"
 }
