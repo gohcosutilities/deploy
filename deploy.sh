@@ -1214,7 +1214,7 @@ create_docker_compose
 
 # Start Docker stack
 echo -e "${YELLOW}Starting Docker stack...${NC}"
-docker compose up -d --build
+docker-compose up --build -d
 
 # Configure host Nginx
 echo -e "${YELLOW}Configuring host Nginx...${NC}"
